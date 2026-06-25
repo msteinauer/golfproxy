@@ -7,24 +7,31 @@ export default async function handler(req, res) {
 
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
 
-  const { id } = req.query;
-  if (!id) { res.status(400).json({ error: "Missing course id" }); return; }
+  const { q } = req.query;
+  if (!q) { res.status(400).json({ error: "Missing search query" }); return; }
 
-  if (cache.has(id)) {
+  // Check in-memory cache (persists for lifetime of serverless instance)
+  const cacheKey = q.toLowerCase().trim();
+  if (cache.has(cacheKey)) {
     res.setHeader("X-Cache", "HIT");
-    res.setHeader("Cache-Control", "public, max-age=86400");
-    res.status(200).json(cache.get(id));
+    res.status(200).json(cache.get(cacheKey));
     return;
   }
 
   try {
     const response = await fetch(
-      `https://api.golfcourseapi.com/v1/courses/${id}`,
+      `https://api.golfcourseapi.com/v1/search?search_query=${encodeURIComponent(q)}`,
       { headers: { "Authorization": `Key ${process.env.GOLF_API_KEY}` } }
     );
     const data = await response.json();
-    cache.set(id, data);
-    res.setHeader("Cache-Control", "public, max-age=86400");
+
+    // Cache successful responses
+    if (data.courses) {
+      cache.set(cacheKey, data);
+      // Also set HTTP cache header so browser caches for 24 hours
+      res.setHeader("Cache-Control", "public, max-age=86400");
+    }
+
     res.status(200).json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
