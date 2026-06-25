@@ -1,6 +1,9 @@
 {
   "rewrites": [
     { "source": "/api/search", "destination": "/api/search" },
-    { "source": "/api/course", "destination": "/api/course" }
+    { "source": "/api/course", "destination": "/api/course" },
+    { "source": "/api/courses", "destination": "/api/courses" },
+    { "source": "/api/download", "destination": "/api/download" },
+    { "source": "/api/setup", "destination": "/api/setup" }
   ]
 }
