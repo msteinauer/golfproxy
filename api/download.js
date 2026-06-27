@@ -1,35 +1,28 @@
-// Downloads all US courses using search API with alphabetical queries
-// Searches "a", "b", "c"... plus common golf words to maximize coverage
-// Search API has separate (higher) rate limit than courses/{id} endpoint
+// ID-based downloader with slow rate to avoid hitting limits
+// Fetches one course per second to stay well under rate limits
+// Call: https://golfproxy.vercel.app/api/download?start=1&end=100
+// With 1 req/sec and 10 second Vercel timeout = ~8 courses per call
+// Run repeatedly to build database
 
 const GOLF_API_KEY = process.env.GOLF_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-// Alphabetical single letters + common golf name words
-const SEARCH_TERMS = [
-  "a","b","c","d","e","f","g","h","i","j","k","l","m",
-  "n","o","p","q","r","s","t","u","v","w","x","y","z",
-  "golf","club","country","links","course","creek","ridge",
-  "lake","hill","pines","oak","cedar","pine","eagle","birch",
-  "meadow","valley","river","forest","ranch","resort","national",
-  "municipal","public","royal","bay","sand","rock","stone",
-  "green","fairway","par","ace","iron","wood","wedge","driver"
-];
-
-async function searchCourses(query) {
+async function getCourse(id) {
   try {
     const res = await fetch(
-      `https://api.golfcourseapi.com/v1/search?search_query=${encodeURIComponent(query)}`,
+      `https://api.golfcourseapi.com/v1/courses/${id}`,
       { headers: { "Authorization": `Key ${GOLF_API_KEY}` } }
     );
     const text = await res.text();
+    if (res.status === 404) return { notFound: true };
     let data;
-    try { data = JSON.parse(text); } catch { return { courses: [], rateLimited: false }; }
-    if (data.error && data.error.includes("rate limit")) return { courses: [], rateLimited: true };
-    return { courses: data.courses || [], rateLimited: false };
+    try { data = JSON.parse(text); } catch { return { notFound: true }; }
+    if (data.error && data.error.includes("rate limit")) return { rateLimited: true };
+    if (data.id || data.club_name) return data;
+    return { notFound: true };
   } catch {
-    return { courses: [], rateLimited: false };
+    return { notFound: true };
   }
 }
 
@@ -47,7 +40,6 @@ async function upsertCourses(courses) {
     number_of_holes: c.number_of_holes || 18,
     tees: JSON.stringify(c.tees || {}),
   }));
-
   await fetch(`${SUPABASE_URL}/rest/v1/courses`, {
     method: "POST",
     headers: {
@@ -63,47 +55,35 @@ async function upsertCourses(courses) {
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
-  // start/end refer to index into SEARCH_TERMS array
-  const startIdx = req.query.start !== undefined ? parseInt(req.query.start) : 0;
-  const endIdx = req.query.end !== undefined ? parseInt(req.query.end) : SEARCH_TERMS.length - 1;
+  const start = parseInt(req.query.start) || 1;
+  const end = parseInt(req.query.end) || 50;
+  const delayMs = parseInt(req.query.delay) || 800; // default 800ms between requests
 
-  const seen = new Set();
-  let totalSaved = 0;
-  let totalRequests = 0;
+  let saved = 0;
+  let notFound = 0;
   let rateLimited = false;
-  let lastTerm = "";
-  let lastIdx = startIdx;
-  const results = [];
+  let lastId = start;
+  const batch = [];
 
-  for (let i = startIdx; i <= endIdx && i < SEARCH_TERMS.length; i++) {
-    if (rateLimited) break;
-    const term = SEARCH_TERMS[i];
-    lastTerm = term;
-    lastIdx = i;
+  for (let id = start; id <= end; id++) {
+    lastId = id;
+    const result = await getCourse(id);
 
-    const { courses, rateLimited: rl } = await searchCourses(term);
-    totalRequests++;
-    rateLimited = rl;
+    if (result.rateLimited) { rateLimited = true; break; }
+    if (result.notFound) { notFound++; }
+    else {
+      batch.push(result);
+      saved++;
+      if (batch.length >= 20) {
+        await upsertCourses(batch);
+        batch.length = 0;
+      }
+    }
 
-    // Save ALL courses (US and non-US) — app filters by state
-    const newCourses = courses.filter(c => !seen.has(c.id));
-    newCourses.forEach(c => seen.add(c.id));
-
-    await upsertCourses(newCourses);
-    totalSaved += newCourses.length;
-    results.push({ term, found: newCourses.length });
-
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, delayMs));
   }
 
-  res.status(200).json({
-    start_idx: startIdx,
-    end_idx: endIdx,
-    last_idx: lastIdx,
-    last_term: lastTerm,
-    total_saved: totalSaved,
-    total_requests: totalRequests,
-    rate_limited: rateLimited,
-    results
-  });
+  if (batch.length) await upsertCourses(batch);
+
+  res.status(200).json({ start, end, last_id: lastId, saved, not_found: notFound, rate_limited: rateLimited });
 }
