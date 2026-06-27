@@ -19,7 +19,9 @@ async function getCourse(id) {
     let data;
     try { data = JSON.parse(text); } catch { return { notFound: true }; }
     if (data.error && data.error.includes("rate limit")) return { rateLimited: true };
-    if (data.id || data.club_name) return data;
+    // API wraps response in "course" object
+    const course = data.course || data;
+    if (course.id || course.club_name) return course;
     return { notFound: true };
   } catch {
     return { notFound: true };
@@ -57,7 +59,7 @@ export default async function handler(req, res) {
 
   const start = parseInt(req.query.start) || 1;
   const end = parseInt(req.query.end) || 50;
-  const delayMs = parseInt(req.query.delay) || 800; // default 800ms between requests
+  const delayMs = parseInt(req.query.delay) || 300; // default 300ms between requests
 
   let saved = 0;
   let notFound = 0;
