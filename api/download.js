@@ -1,38 +1,35 @@
-// Fetches courses by ID range - the only way to get ALL courses
-// US courses have IDs scattered from ~1 to ~30000
-// Call: https://golfproxy.vercel.app/api/download?start=1&end=500
-// With 10,000 requests/day, process 500 IDs per batch, 20 batches/day = 10,000 IDs/day
-// Day 1: 1-10000, Day 2: 10001-20000, Day 3: 20001-30000
+// Downloads all US courses using search API with alphabetical queries
+// Searches "a", "b", "c"... plus common golf words to maximize coverage
+// Search API has separate (higher) rate limit than courses/{id} endpoint
 
 const GOLF_API_KEY = process.env.GOLF_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-async function getCourse(id) {
+// Alphabetical single letters + common golf name words
+const SEARCH_TERMS = [
+  "a","b","c","d","e","f","g","h","i","j","k","l","m",
+  "n","o","p","q","r","s","t","u","v","w","x","y","z",
+  "golf","club","country","links","course","creek","ridge",
+  "lake","hill","pines","oak","cedar","pine","eagle","birch",
+  "meadow","valley","river","forest","ranch","resort","national",
+  "municipal","public","royal","bay","sand","rock","stone",
+  "green","fairway","par","ace","iron","wood","wedge","driver"
+];
+
+async function searchCourses(query) {
   try {
     const res = await fetch(
-      `https://api.golfcourseapi.com/v1/courses/${id}`,
+      `https://api.golfcourseapi.com/v1/search?search_query=${encodeURIComponent(query)}`,
       { headers: { "Authorization": `Key ${GOLF_API_KEY}` } }
     );
     const text = await res.text();
-
-    // 404 = course doesn't exist at this ID
-    if (res.status === 404) return { notFound: true };
-
-    // Try parsing JSON
     let data;
-    try { data = JSON.parse(text); }
-    catch { return { notFound: true }; }
-
-    // Check for rate limit
-    if (data.error && data.error.includes("rate limit")) return { rateLimited: true };
-
-    // Valid course
-    if (data.id || data.club_name) return data;
-
-    return { notFound: true };
+    try { data = JSON.parse(text); } catch { return { courses: [], rateLimited: false }; }
+    if (data.error && data.error.includes("rate limit")) return { courses: [], rateLimited: true };
+    return { courses: data.courses || [], rateLimited: false };
   } catch {
-    return { notFound: true };
+    return { courses: [], rateLimited: false };
   }
 }
 
@@ -66,47 +63,47 @@ async function upsertCourses(courses) {
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
-  const start = parseInt(req.query.start) || 1;
-  const end = parseInt(req.query.end) || 500;
+  // start/end refer to index into SEARCH_TERMS array
+  const startIdx = parseInt(req.query.start) || 0;
+  const endIdx = parseInt(req.query.end) || SEARCH_TERMS.length - 1;
 
-  let usSaved = 0;
-  let notFound = 0;
+  const seen = new Set();
+  let totalSaved = 0;
+  let totalRequests = 0;
   let rateLimited = false;
-  let lastId = start;
-  const batch = [];
+  let lastTerm = "";
+  let lastIdx = startIdx;
+  const results = [];
 
-  for (let id = start; id <= end; id++) {
-    lastId = id;
-    const result = await getCourse(id);
+  for (let i = startIdx; i <= endIdx && i < SEARCH_TERMS.length; i++) {
+    if (rateLimited) break;
+    const term = SEARCH_TERMS[i];
+    lastTerm = term;
+    lastIdx = i;
 
-    if (result.rateLimited) {
-      rateLimited = true;
-      break;
-    }
+    const { courses, rateLimited: rl } = await searchCourses(term);
+    totalRequests++;
+    rateLimited = rl;
 
-    if (result.notFound) {
-      notFound++;
-      continue;
-    }
+    // Save ALL courses (US and non-US) — app filters by state
+    const newCourses = courses.filter(c => !seen.has(c.id));
+    newCourses.forEach(c => seen.add(c.id));
 
-    // Save all courses (US and non-US) — filter in the app
-    batch.push(result);
-    usSaved++;
+    await upsertCourses(newCourses);
+    totalSaved += newCourses.length;
+    results.push({ term, found: newCourses.length });
 
-    // Upsert in batches of 50
-    if (batch.length >= 50) {
-      await upsertCourses(batch);
-      batch.length = 0;
-    }
-
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 150));
   }
 
-  if (batch.length) await upsertCourses(batch);
-
   res.status(200).json({
-    start, end, last_id: lastId,
-    saved: usSaved, not_found: notFound,
-    rate_limited: rateLimited
+    start_idx: startIdx,
+    end_idx: endIdx,
+    last_idx: lastIdx,
+    last_term: lastTerm,
+    total_saved: totalSaved,
+    total_requests: totalRequests,
+    rate_limited: rateLimited,
+    results
   });
 }
