@@ -10,14 +10,13 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 async function getCourse(id) {
   try {
+    // Call our own proxy endpoint which handles errors cleanly
     const res = await fetch(
-      `https://api.golfcourseapi.com/v1/courses/${id}`,
-      { headers: { "Authorization": `Key ${GOLF_API_KEY}` } }
+      `https://golfproxy.vercel.app/api/course?id=${id}`
     );
-    if (res.status === 404) return { notFound: true };
     const data = await res.json();
-    if (data.error === "rate limit exceeded") return { rateLimited: true };
-    // Return course if it has a valid club name
+    if (data.rateLimited) return { rateLimited: true };
+    if (data.notFound) return { notFound: true };
     if (data.id || data.club_name) return data;
     return { notFound: true };
   } catch {

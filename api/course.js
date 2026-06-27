@@ -22,11 +22,31 @@ export default async function handler(req, res) {
       `https://api.golfcourseapi.com/v1/courses/${id}`,
       { headers: { "Authorization": `Key ${process.env.GOLF_API_KEY}` } }
     );
-    const data = await response.json();
+
+    // Read as text first to handle non-JSON responses
+    const text = await response.text();
+
+    if (response.status === 404) {
+      return res.status(200).json({ notFound: true });
+    }
+
+    // Try to parse JSON
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Non-JSON response — could be HTML error page
+      return res.status(200).json({ notFound: true, raw: text.slice(0, 100) });
+    }
+
+    if (data.error === "rate limit exceeded") {
+      return res.status(200).json({ rateLimited: true });
+    }
+
     cache.set(id, data);
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.status(200).json(data);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(200).json({ notFound: true, error: e.message });
   }
 }
