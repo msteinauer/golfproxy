@@ -1,47 +1,27 @@
-// Downloader - searches "golf [state]" and "club [state]" for all 50 US states
-// Only 100 API requests total for full coverage!
-// Call: https://golfproxy.vercel.app/api/download?state=Washington
-// Or:   https://golfproxy.vercel.app/api/download?all=true
+// Fetches courses by ID range - the only way to get ALL courses
+// US courses have IDs scattered from ~1 to ~30000
+// Call: https://golfproxy.vercel.app/api/download?start=1&end=500
+// With 10,000 requests/day, process 500 IDs per batch, 20 batches/day = 10,000 IDs/day
+// Day 1: 1-10000, Day 2: 10001-20000, Day 3: 20001-30000
 
 const GOLF_API_KEY = process.env.GOLF_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const US_STATES = [
-  "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
-  "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
-  "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
-  "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
-  "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
-  "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
-  "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
-  "Wisconsin","Wyoming"
-];
-
-const STATE_ABBREVS = {
-  "Alabama":"AL","Alaska":"AK","Arizona":"AZ","Arkansas":"AR","California":"CA",
-  "Colorado":"CO","Connecticut":"CT","Delaware":"DE","Florida":"FL","Georgia":"GA",
-  "Hawaii":"HI","Idaho":"ID","Illinois":"IL","Indiana":"IN","Iowa":"IA","Kansas":"KS",
-  "Kentucky":"KY","Louisiana":"LA","Maine":"ME","Maryland":"MD","Massachusetts":"MA",
-  "Michigan":"MI","Minnesota":"MN","Mississippi":"MS","Missouri":"MO","Montana":"MT",
-  "Nebraska":"NE","Nevada":"NV","New Hampshire":"NH","New Jersey":"NJ","New Mexico":"NM",
-  "New York":"NY","North Carolina":"NC","North Dakota":"ND","Ohio":"OH","Oklahoma":"OK",
-  "Oregon":"OR","Pennsylvania":"PA","Rhode Island":"RI","South Carolina":"SC",
-  "South Dakota":"SD","Tennessee":"TN","Texas":"TX","Utah":"UT","Vermont":"VT",
-  "Virginia":"VA","Washington":"WA","West Virginia":"WV","Wisconsin":"WI","Wyoming":"WY"
-};
-
-async function searchCourses(query) {
+async function getCourse(id) {
   try {
     const res = await fetch(
-      `https://api.golfcourseapi.com/v1/search?search_query=${encodeURIComponent(query)}`,
+      `https://api.golfcourseapi.com/v1/courses/${id}`,
       { headers: { "Authorization": `Key ${GOLF_API_KEY}` } }
     );
+    if (res.status === 404) return { notFound: true };
     const data = await res.json();
-    if (data.error) return { courses: [], rateLimited: true };
-    return { courses: data.courses || [], rateLimited: false };
+    if (data.error === "rate limit exceeded") return { rateLimited: true };
+    // Return course if it has a valid club name
+    if (data.id || data.club_name) return data;
+    return { notFound: true };
   } catch {
-    return { courses: [], rateLimited: false };
+    return { notFound: true };
   }
 }
 
@@ -72,65 +52,50 @@ async function upsertCourses(courses) {
   });
 }
 
-async function downloadState(stateName) {
-  const stateAbbr = STATE_ABBREVS[stateName];
-  const seen = new Set();
-  const stateCourses = [];
-  let requests = 0;
-  let rateLimited = false;
-
-  // Just two searches per state: "golf [state]" and "club [state]"
-  for (const term of ["golf", "club"]) {
-    if (rateLimited) break;
-    const query = `${term} ${stateName}`;
-    const { courses, rateLimited: rl } = await searchCourses(query);
-    requests++;
-    rateLimited = rl;
-
-    // Save ALL US courses from results, not just this state
-    courses.forEach(c => {
-      const country = (c.location?.country || "").toLowerCase();
-      const isUS = country.includes("united states") || country.includes("usa") || country === "";
-      if (isUS && !seen.has(c.id)) {
-        seen.add(c.id);
-        stateCourses.push(c);
-      }
-    });
-
-    await new Promise(r => setTimeout(r, 150));
-  }
-
-  await upsertCourses(stateCourses);
-  return { state: stateName, found: stateCourses.length, requests, rateLimited };
-}
-
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const { state, all } = req.query;
 
-  try {
-    if (state) {
-      const result = await downloadState(state);
-      res.status(200).json(result);
-    } else if (all === "true") {
-      const results = [];
-      let totalFound = 0;
-      let totalRequests = 0;
+  const start = parseInt(req.query.start) || 1;
+  const end = parseInt(req.query.end) || 500;
 
-      for (const stateName of US_STATES) {
-        const result = await downloadState(stateName);
-        results.push(result);
-        totalFound += result.found;
-        totalRequests += result.requests;
-        if (result.rateLimited) break;
-        await new Promise(r => setTimeout(r, 300));
-      }
+  let usSaved = 0;
+  let notFound = 0;
+  let rateLimited = false;
+  let lastId = start;
+  const batch = [];
 
-      res.status(200).json({ results, total_found: totalFound, total_requests: totalRequests });
-    } else {
-      res.status(400).json({ error: "Pass ?state=Washington or ?all=true" });
+  for (let id = start; id <= end; id++) {
+    lastId = id;
+    const result = await getCourse(id);
+
+    if (result.rateLimited) {
+      rateLimited = true;
+      break;
     }
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    if (result.notFound) {
+      notFound++;
+      continue;
+    }
+
+    // Save all courses (US and non-US) — filter in the app
+    batch.push(result);
+    usSaved++;
+
+    // Upsert in batches of 50
+    if (batch.length >= 50) {
+      await upsertCourses(batch);
+      batch.length = 0;
+    }
+
+    await new Promise(r => setTimeout(r, 100));
   }
+
+  if (batch.length) await upsertCourses(batch);
+
+  res.status(200).json({
+    start, end, last_id: lastId,
+    saved: usSaved, not_found: notFound,
+    rate_limited: rateLimited
+  });
 }
