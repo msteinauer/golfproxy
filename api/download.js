@@ -93,7 +93,7 @@ export default async function handler(req, res) {
     totalSaved += newCourses.length;
     results.push({ term, found: newCourses.length });
 
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise(r => setTimeout(r, 50));
   }
 
   res.status(200).json({
