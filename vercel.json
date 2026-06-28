@@ -4,6 +4,13 @@
     { "source": "/api/course", "destination": "/api/course" },
     { "source": "/api/courses", "destination": "/api/courses" },
     { "source": "/api/download", "destination": "/api/download" },
-    { "source": "/api/setup", "destination": "/api/setup" }
+    { "source": "/api/setup", "destination": "/api/setup" },
+    { "source": "/api/cron", "destination": "/api/cron" }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "0 5 * * *"
+    }
   ]
 }
